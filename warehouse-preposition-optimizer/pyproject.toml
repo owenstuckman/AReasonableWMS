@@ -15,6 +15,13 @@ dependencies = [
     "prometheus-client>=0.21",
     "python-multipart>=0.0.12",
     "pyyaml>=6.0",
+    # Phase 2: ML demand prediction
+    "lightgbm>=4.0",
+    "shap>=0.46",
+    "optuna>=3.0",
+    "scikit-learn>=1.5",
+    "pandas>=2.0",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

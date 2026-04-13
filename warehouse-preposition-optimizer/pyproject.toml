@@ -57,3 +57,8 @@ pythonpath = ["."]
 [tool.coverage.run]
 source = ["src"]
 omit = ["tests/*"]
+
+[dependency-groups]
+dev = [
+    "numpy>=2.4.4",
+]

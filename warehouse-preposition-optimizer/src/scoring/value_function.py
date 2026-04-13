@@ -5,13 +5,18 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from src.config import ResourceConfig
-from src.models.inventory import Location
+from src.models.inventory import InventoryPosition, Location
 from src.models.movements import CandidateMovement
 from src.models.orders import CarrierAppointment, OutboundOrder
 from src.scoring.demand_predictor import DemandPredictor
 from src.scoring.weights import ScoringWeights
+
+if TYPE_CHECKING:
+    from src.prediction.features import HistoricalData
+    from src.prediction.inference import InferenceEngine
 
 _ORDER_WEIGHT_MIN = 0.1
 _ORDER_WEIGHT_MAX = 10.0
@@ -25,11 +30,15 @@ class ScoringContext:
         orders: Outbound orders within the planning horizon.
         appointments: Carrier appointments within the planning horizon.
         resource_utilization: Current fleet utilization fraction [0.0, 1.0].
+        inventory_by_sku: Optional map of sku_id → InventoryPosition for ML features.
+        historical_data: Optional historical demand statistics for ML features.
     """
 
     orders: list[OutboundOrder] = field(default_factory=list)
     appointments: list[CarrierAppointment] = field(default_factory=list)
     resource_utilization: float = 0.0
+    inventory_by_sku: dict[str, InventoryPosition] = field(default_factory=dict)
+    historical_data: HistoricalData | None = None
 
 
 class MovementScorer:
@@ -38,15 +47,26 @@ class MovementScorer:
     Implements V(m) = (T_saved * P_load * W_order) / (C_move + C_opportunity)
     where each term is weighted by the ScoringWeights configuration.
 
+    Phase 1: P_load uses binary order lookup.
+    Phase 2: When ml_inference is provided, P_load uses LightGBM + circuit breaker
+             and SHAP contributions are stored in score_components.
+
     Args:
         weights: Scoring weight configuration.
         config: Physical resource configuration for cost estimates.
+        ml_inference: Optional Phase 2 InferenceEngine. If None, Phase 1 path is used.
     """
 
-    def __init__(self, weights: ScoringWeights, config: ResourceConfig) -> None:
+    def __init__(
+        self,
+        weights: ScoringWeights,
+        config: ResourceConfig,
+        ml_inference: InferenceEngine | None = None,
+    ) -> None:
         self._weights = weights
         self._config = config
-        self._predictor = DemandPredictor()
+        self._phase1_predictor = DemandPredictor()
+        self._ml_inference = ml_inference
 
     def score(
         self, candidate: CandidateMovement, context: ScoringContext
@@ -63,17 +83,22 @@ class MovementScorer:
         Returns:
             The computed score V(m), or 0.0 if the movement is not beneficial.
         """
-        # Find the best appointment for this SKU to determine P_load and W_order
         best_appointment: CarrierAppointment | None = None
         best_p_load = 0.0
         best_w_order = 0.0
+        shap_values: dict[str, float] = {}
+
+        inventory_position = context.inventory_by_sku.get(candidate.sku_id)
 
         for appointment in context.appointments:
             p_load = self._compute_load_probability(
-                candidate.sku_id, appointment, context.orders
+                candidate.sku_id,
+                appointment,
+                context.orders,
+                inventory_position=inventory_position,
+                historical_data=context.historical_data,
             )
             if p_load > 0.0:
-                # Find the highest-priority order for this appointment
                 for order in context.orders:
                     if order.appointment.appointment_id == appointment.appointment_id:
                         w_order = self._compute_order_weight(order)
@@ -93,7 +118,16 @@ class MovementScorer:
             candidate.score = 0.0
             return 0.0
 
-        # Determine dock door coordinates from the appointment's dock door
+        # Gather SHAP explanation when ML is active (best-effort; no exception on failure)
+        if self._ml_inference is not None:
+            shap_values = self._ml_inference.explain(
+                sku_id=candidate.sku_id,
+                appointment=best_appointment,
+                orders=context.orders,
+                inventory_position=inventory_position,
+                historical_data=context.historical_data,
+            )
+
         dock_door_x, dock_door_y = _dock_door_coords(best_appointment.dock_door)
 
         t_saved = self._compute_time_saved(
@@ -110,6 +144,7 @@ class MovementScorer:
                 "w_order": best_w_order,
                 "c_move": 0.0,
                 "c_opportunity": 0.0,
+                **{f"shap_{k}": v for k, v in shap_values.items()},
             }
             candidate.score = 0.0
             return 0.0
@@ -140,6 +175,7 @@ class MovementScorer:
             "c_opportunity": c_opportunity,
             "numerator": numerator,
             "denominator": denominator,
+            **{f"shap_{k}": v for k, v in shap_values.items()},
         }
         candidate.score = score
         return score
@@ -174,18 +210,30 @@ class MovementScorer:
         sku_id: str,
         appointment: CarrierAppointment,
         orders: list[OutboundOrder],
+        inventory_position: InventoryPosition | None = None,
+        historical_data: HistoricalData | None = None,
     ) -> float:
-        """Delegate to DemandPredictor for load probability.
+        """Delegate to ML inference engine (Phase 2) or binary lookup (Phase 1).
 
         Args:
             sku_id: SKU identifier.
             appointment: Target carrier appointment.
             orders: All outbound orders in the horizon.
+            inventory_position: Current inventory position (for ML feature quality).
+            historical_data: Historical demand statistics (for ML feature quality).
 
         Returns:
             Probability in [0.0, 1.0].
         """
-        return self._predictor.predict(sku_id, appointment, orders)
+        if self._ml_inference is not None:
+            return self._ml_inference.predict(
+                sku_id=sku_id,
+                appointment=appointment,
+                orders=orders,
+                inventory_position=inventory_position,
+                historical_data=historical_data,
+            )
+        return self._phase1_predictor.predict(sku_id, appointment, orders)
 
     def _compute_order_weight(self, order: OutboundOrder) -> float:
         """Compute urgency-weighted order priority.

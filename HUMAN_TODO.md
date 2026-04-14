@@ -95,21 +95,52 @@ For production, use managed services (RDS + ElastiCache) or your on-prem equival
 
 ---
 
-## Phase 2 Prerequisites (ML)
+## Phase 2 Prerequisites (ML) — Code complete, data required
 
 ### 11. Export ≥ 90 days of historical WMS data
-**Why:** LightGBM needs labeled training data. Required columns:
-- `sku_id`, `dock_door`, `window_start`, `window_end`, `was_loaded` (0/1), plus all feature columns from `src/prediction/features.py`
-- Format: CSV or direct DB table
-- Minimum records: ~10,000 (sku × dock × 2hr window combinations)
+**Why:** LightGBM needs labeled training data. The code is ready; only the data is missing.
 
-Contact your WMS vendor or DBA for a data extract if this isn't already in the read-only schema.
+Generate synthetic data to verify the pipeline works end-to-end first:
+```bash
+cd warehouse-preposition-optimizer
+uv run python scripts/generate_training_data.py --synthetic --rows 20000 --out data/training.csv
+```
 
-### 12. Validate model before enabling feature flag
-**Why:** The `use_ml_prediction` flag in `config.yml` replaces the binary P_load with the ML model. Don't enable it until:
-- AUC-ROC ≥ 0.75 on holdout set
-- Calibration curve is reasonably flat (predicted probabilities match observed frequencies)
+For real training data from your WMS:
+```bash
+uv run python scripts/generate_training_data.py \
+  --db-url postgresql+psycopg2://user:pass@host/wms_db \
+  --start-date 2024-01-01 --end-date 2024-03-31 \
+  --out data/training.csv
+```
+
+Required columns in the output: all 20 from `src/prediction/features.FEATURE_NAMES` plus `was_loaded` (0/1).
+Minimum records: ~10,000 (sku × dock × 2hr window combinations). More = better.
+
+### 12. Train the model
+**Why:** The `MLDemandPredictor` is fully implemented but has no saved artifact yet.
+
+```python
+# Run once after generating training data:
+import pandas as pd
+from src.prediction.trainer import MLDemandPredictor
+
+df = pd.read_csv("data/training.csv")
+model = MLDemandPredictor()
+metrics = model.train(df, n_trials=50, cv_folds=5)
+print(metrics)  # Review cv_auc_mean
+model.save("models/demand_lgbm.pkl")
+```
+
+Minimum bar before enabling in production: `cv_auc_mean >= 0.75`.
+
+### 13. Validate model before enabling feature flag
+**Why:** The `prediction.enabled: true` flag in `config.yml` switches P_load from binary lookup to ML.
+Do not enable until:
+- AUC-ROC ≥ 0.75 on holdout set (reported by `train()` metrics)
+- Calibration curve is reasonably flat
 - Run `scripts/backtest.py` to confirm ML scoring correlates with actual loading outcomes
+- Set `prediction.model_path: models/demand_lgbm.pkl` in `config.yml`
 
 ---
 

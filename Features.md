@@ -101,19 +101,27 @@ Tracks every feature by phase, status, and the file(s) that implement it.
 
 ---
 
-## Phase 2 — ML Demand Prediction (NOT STARTED)
+## Phase 2 — ML Demand Prediction (SHIPPED)
 
 | Feature | File | Status |
 |---------|------|--------|
-| `FeatureBuilder` — 17 features across temporal / SKU / dock / order pipeline dimensions | `src/prediction/features.py` | ⬜ |
-| `DemandPredictor.train()` — LightGBM with TimeSeriesSplit + Optuna hyperparameter search | `src/prediction/trainer.py` | ⬜ |
-| `DemandPredictor.predict()` — calibrated probability [0.0, 1.0] | `src/prediction/trainer.py` | ⬜ |
-| `DemandPredictor.explain()` — SHAP values per feature | `src/prediction/trainer.py` | ⬜ |
-| `DemandPredictor.inference()` — real-time serving with circuit breaker | `src/prediction/inference.py` | ⬜ |
-| Training data generator script | `scripts/generate_training_data.py` | ⬜ |
-| SMOTE / class_weight for imbalanced labels | `src/prediction/trainer.py` | ⬜ |
-| Feature flag integration in scorer (`use_ml_prediction`) | `src/scoring/value_function.py` | ⬜ |
-| SHAP contributions surfaced in score explanations | `src/api/routes/scoring.py` | ⬜ |
+| `FeatureBuilder` — 20 features: temporal (cyclical sin/cos), SKU velocity, dock-level, order pipeline | `src/prediction/features.py` | ✅ |
+| `HistoricalData` dataclass — carries demand, CV, days-since-shipment, carrier/SKU frequency | `src/prediction/features.py` | ✅ |
+| `FEATURE_NAMES` canonical list — shared by training and inference to prevent drift | `src/prediction/features.py` | ✅ |
+| `MLDemandPredictor.train()` — LightGBM with TimeSeriesSplit CV + Optuna 50-trial search | `src/prediction/trainer.py` | ✅ |
+| `MLDemandPredictor.predict()` — isotonic-calibrated probability [0.0, 1.0] | `src/prediction/trainer.py` | ✅ |
+| `MLDemandPredictor.explain()` — SHAP TreeExplainer values per feature | `src/prediction/trainer.py` | ✅ |
+| `MLDemandPredictor.save()` / `load()` — pickle persistence for model + explainer | `src/prediction/trainer.py` | ✅ |
+| `scale_pos_weight` class imbalance handling | `src/prediction/trainer.py` | ✅ |
+| `InferenceEngine` — wraps ML predictor with circuit breaker + TTL cache + Phase 1 fallback | `src/prediction/inference.py` | ✅ |
+| Circuit breaker — opens after 3 consecutive failures, half-opens after 60s recovery | `src/prediction/inference.py` | ✅ |
+| Prediction cache — MD5-keyed TTL cache (default 5 min) to avoid re-computing identical inputs | `src/prediction/inference.py` | ✅ |
+| `MovementScorer` ML injection — optional `ml_inference: InferenceEngine` parameter | `src/scoring/value_function.py` | ✅ |
+| SHAP contributions stored as `shap_*` keys in `candidate.score_components` | `src/scoring/value_function.py` | ✅ |
+| Phase 1 path preserved — no ML = binary P_load, no SHAP keys, zero behaviour change | `src/scoring/value_function.py` | ✅ |
+| `ScoringContext` extended — `inventory_by_sku` and `historical_data` optional fields | `src/scoring/value_function.py` | ✅ |
+| `/api/v1/scoring/explain/{id}` — now returns `shap_contributions` dict and `ml_active` flag | `src/api/routes/scoring.py` | ✅ |
+| `scripts/generate_training_data.py` — `--synthetic` (dev) + `--db-url` (production) modes | `scripts/generate_training_data.py` | ✅ |
 
 ---
 

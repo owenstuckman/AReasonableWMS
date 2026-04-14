@@ -30,17 +30,29 @@ Coverage: `src/scoring/` ≥ 98%, `src/constraints/` ≥ 95% (meets ≥ 90% requ
 
 ---
 
-## Phase 2: ML Demand Prediction — NOT STARTED
+## Phase 2: ML Demand Prediction — COMPLETE
 
 Replaces binary `P_load` with LightGBM probabilistic model. Gated by `use_ml_prediction` feature flag.
+All 26 Phase 2 tests pass. Coverage: `src/prediction/` ≥ 88% across all modules.
 
 | Step | File(s) | Status |
 |------|---------|--------|
-| 8 — Feature engineering | `src/prediction/features.py` | ⬜ Not started |
-| 9 — Model training | `src/prediction/trainer.py`, `scripts/generate_training_data.py` | ⬜ Not started |
-| 10 — Integration with scoring | Modify `src/scoring/value_function.py` | ⬜ Not started |
+| 8 — Feature engineering | `src/prediction/features.py` | ✅ Done |
+| 9 — Model training | `src/prediction/trainer.py`, `scripts/generate_training_data.py` | ✅ Done |
+| 10 — Integration with scoring | `src/scoring/value_function.py`, `src/api/routes/scoring.py` | ✅ Done |
 
-**Pre-requisites:** ≥ 90 days of historical WMS data (SKU, dock_door, time_window, was_loaded label).
+**Feature summary:**
+- `FeatureBuilder` — 20 features: temporal (cyclical), SKU velocity, dock-level, order pipeline
+- `MLDemandPredictor` — LightGBM + Optuna (50-trial search) + isotonic calibration + SHAP explanation + save/load
+- `InferenceEngine` — circuit breaker (opens after 3 failures, half-opens after 60s) + TTL cache (5 min) + Phase 1 fallback
+- `MovementScorer` — accepts optional `ml_inference: InferenceEngine`; SHAP values stored as `shap_*` keys in `score_components`
+- `/api/v1/scoring/explain/{id}` — now returns `shap_contributions` dict and `ml_active` flag
+- `scripts/generate_training_data.py` — `--synthetic` mode for dev, `--db-url` mode for real WMS data
+
+**Pre-requisite for activating in production:**
+- Generate ≥ 90 days of historical data with `scripts/generate_training_data.py --db-url ...`
+- Train: `from src.prediction.trainer import MLDemandPredictor; m = MLDemandPredictor(); m.train(df); m.save("models/demand_lgbm.pkl")`
+- Validate AUC-ROC ≥ 0.75 before setting `prediction.enabled: true` in `config.yml`
 
 ---
 

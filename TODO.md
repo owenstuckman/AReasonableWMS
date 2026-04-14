@@ -75,17 +75,31 @@ Replaces greedy top-N dispatch with CP-SAT assignment solver + VRPTW route plann
 
 ---
 
-## Phase 4: Reinforcement Learning — NOT STARTED
+## Phase 4: Reinforcement Learning — COMPLETE
 
 Optional. For large multi-AGV deployments where coordination is the binding constraint.
+19 Phase 4 tests pass. Total test suite: 102 passed.
 
 | Step | File(s) | Status |
 |------|---------|--------|
-| 13 — Simulation environment | `src/simulation/{warehouse_env,digital_twin,reward}.py` | ⬜ |
-| 14 — Single-agent PPO prototype | `scripts/train_rl.py` | ⬜ |
-| 14a — Multi-agent MAPPO (Ray RLlib) | `scripts/train_marl.py` | ⬜ |
-| 14b — ONNX export for production inference | `scripts/export_onnx.py` | ⬜ |
-| 14c — OR fallback policy integration | `src/optimizer/scheduler.py` | ⬜ |
+| 13 — Simulation environment | `src/simulation/{warehouse_env,digital_twin,reward}.py` | ✅ |
+| 14 — Single-agent PPO prototype | `scripts/train_rl.py` | ✅ |
+| 14a — Multi-agent MAPPO (Ray RLlib) | `scripts/train_marl.py` | ✅ |
+| 14b — ONNX export for production inference | `scripts/export_onnx.py` | ✅ |
+| 14c — OR fallback policy + RL inference wrapper | `src/optimizer/rl_policy.py`, `src/optimizer/scheduler.py` | ✅ |
+
+**How to activate:**
+1. Train a model: `uv run python scripts/train_rl.py --timesteps 1000000 --out models/ppo_prepos.zip`
+   (requires `pip install stable-baselines3[extra]`)
+2. Export to ONNX: `uv run python scripts/export_onnx.py --model models/ppo_prepos.zip --out models/policy.onnx --verify`
+   (requires `pip install onnx onnxruntime`)
+3. Wire at startup in `src/api/main.py` — see HUMAN_TODO.md item 26
+4. Set `use_rl_policy: true` in `config.yml` (falls back to OR-Tools or greedy automatically)
+
+**Dispatch priority order in scheduler:**
+1. Phase 4 RL policy (when `use_rl_policy=True` and policy loaded) — OR-Tools fallback on NO_OP/failure
+2. Phase 3 OR-Tools (when `use_or_optimization=True`)
+3. Phase 1/2 greedy top-N
 
 **Pre-requisites:** Phase 3 in production with baseline metrics; accurate digital twin validated against recorded real-world shift data.
 

@@ -151,18 +151,42 @@ Tracks every feature by phase, status, and the file(s) that implement it.
 
 ---
 
-## Phase 4 — Reinforcement Learning (NOT STARTED)
+## Phase 4 — Reinforcement Learning (SHIPPED)
 
+### Simulation Environment
 | Feature | File | Status |
 |---------|------|--------|
-| `WarehousePrePositionEnv` — Gymnasium env wrapping SimPy DES | `src/simulation/warehouse_env.py` | ⬜ |
-| `WarehouseDigitalTwin` — SimPy discrete-event warehouse simulation | `src/simulation/digital_twin.py` | ⬜ |
-| Reward function (time saved, movement cost, dock departure bonus/penalty) | `src/simulation/reward.py` | ⬜ |
-| Action masking — prevent infeasible actions at Gymnasium level | `src/simulation/warehouse_env.py` | ⬜ |
-| Single-agent PPO prototype (Stable Baselines3) | `scripts/train_rl.py` | ⬜ |
-| Multi-agent MAPPO production (Ray RLlib) | `scripts/train_marl.py` | ⬜ |
-| Domain randomization for sim-to-real transfer | `src/simulation/warehouse_env.py` | ⬜ |
-| ONNX export for production inference | `scripts/export_onnx.py` | ⬜ |
+| `RewardWeights` dataclass — configurable weights for all 5 reward components | `src/simulation/reward.py` | ✅ |
+| `compute_step_reward()` — R1 (seconds saved) − R2 (movement cost) per dispatch | `src/simulation/reward.py` | ✅ |
+| `compute_truck_departure_reward()` — R3 (early bonus) / R4 (late penalty) at departure | `src/simulation/reward.py` | ✅ |
+| `compute_shaping_reward()` — potential-based shaping Φ(s')−Φ(s) on avg distance-to-dock | `src/simulation/reward.py` | ✅ |
+| `EpisodeMetrics` dataclass — seconds_saved, movement_cost, hit_rate, dwell_time, etc. | `src/simulation/reward.py` | ✅ |
+| `compute_episode_return()` — total undiscounted return for evaluation | `src/simulation/reward.py` | ✅ |
+| `SimConfig` — shift duration, forklift count, speed, handling time, speedup factor, seed | `src/simulation/digital_twin.py` | ✅ |
+| `WarehouseDigitalTwin` — SimPy DES: forklifts as resources, trucks as processes | `src/simulation/digital_twin.py` | ✅ |
+| Pre-positioning movements executed early in shift as SimPy processes | `src/simulation/digital_twin.py` | ✅ |
+| Staged-load speedup — staged SKUs load at `staging_loading_speedup × base_time` | `src/simulation/digital_twin.py` | ✅ |
+| `apply_movement()` — update inventory mid-episode for agent actions | `src/simulation/digital_twin.py` | ✅ |
+| `get_avg_distance_to_dock()` — distance metric for shaping reward | `src/simulation/digital_twin.py` | ✅ |
+| Stochastic order arrival process (Poisson, optional) | `src/simulation/digital_twin.py` | ✅ |
+| `WarehousePrePositionEnv(gymnasium.Env)` — full Gymnasium-compatible env | `src/simulation/warehouse_env.py` | ✅ |
+| Observation space: candidates (score/t_saved/p_load/w_order/c_move/c_opp) + orders + docks + globals | `src/simulation/warehouse_env.py` | ✅ |
+| Action space: `Discrete(max_candidates + 1)` — index 0 = NO_OP | `src/simulation/warehouse_env.py` | ✅ |
+| `action_masks()` — bool array, NO_OP always valid, slots beyond candidate count masked | `src/simulation/warehouse_env.py` | ✅ |
+| Episode termination at `shift_duration_seconds` | `src/simulation/warehouse_env.py` | ✅ |
+| `EnvConfig` — wraps SimConfig + RewardWeights + env dimensions | `src/simulation/warehouse_env.py` | ✅ |
+
+### Training & Deployment
+| Feature | File | Status |
+|---------|------|--------|
+| SB3 PPO single-agent training script with EvalCallback + TensorBoard logging | `scripts/train_rl.py` | ✅ |
+| Ray RLlib MAPPO multi-agent training — shared policy, centralized training | `scripts/train_marl.py` | ✅ |
+| ONNX export script — torch.onnx.export + onnx.checker + onnxruntime verification | `scripts/export_onnx.py` | ✅ |
+| `RLPolicyInference` — ONNX runtime wrapper with OR-Tools fallback | `src/optimizer/rl_policy.py` | ✅ |
+| Fallback triggers: model absent, NO_OP selected, action out-of-bounds, runtime error | `src/optimizer/rl_policy.py` | ✅ |
+| `SchedulerConfig.use_rl_policy` + `rl_policy_path` feature flags | `src/optimizer/scheduler.py` | ✅ |
+| `PrePositionScheduler._run_rl_cycle()` — builds obs, calls policy, pushes tasks | `src/optimizer/scheduler.py` | ✅ |
+| Three-tier dispatch fallback: RL → OR-Tools → greedy top-N | `src/optimizer/scheduler.py` | ✅ |
 
 ---
 

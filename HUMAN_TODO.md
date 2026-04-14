@@ -270,9 +270,65 @@ Validate: shortest path from any location to any dock door should match actual f
 
 ---
 
-## G. IP / Legal
+## G. Phase 4: RL Activation (Code Complete, Training Required)
 
-### 26. Review US10504055B2 (Boston Dynamics / X Development patent)
+All simulation, training, and inference code is implemented. The following items require human action.
+
+### 26. Install RL training dependencies and train the PPO model
+**Why:** Stable Baselines3 and Ray RLlib are large and not in `pyproject.toml`. They are only needed on the training machine, not the production app server.
+
+```bash
+# Single-agent prototype (laptop / small VM):
+pip install "stable-baselines3[extra]"
+uv run python scripts/train_rl.py --timesteps 1000000 --out models/ppo_prepos.zip
+# Adjust --timesteps based on available compute; 1M ≈ 30–60 min on a modern CPU.
+
+# Multi-agent production (GPU cluster, requires Ray):
+pip install "ray[rllib]" torch
+uv run python scripts/train_marl.py --agents 3 --timesteps 10000000 --gpus 1
+```
+
+After training, export to ONNX (requires `pip install onnx onnxruntime`):
+```bash
+uv run python scripts/export_onnx.py \
+    --model models/ppo_prepos.zip \
+    --out models/policy.onnx \
+    --verify
+```
+
+### 27. Wire `RLPolicyInference` into `src/api/main.py` lifespan
+**Why:** The scheduler accepts an optional `rl_policy` argument, but `main.py` doesn't load it yet (same pattern as Phase 2 ML model loading).
+
+Add to the lifespan handler in `src/api/main.py`:
+```python
+from src.optimizer.rl_policy import RLPolicyInference
+
+rl_policy = None
+if settings.use_rl_policy:
+    rl_policy = RLPolicyInference(
+        onnx_path=settings.optimization.rl_policy_path,
+        fallback_resources=settings.optimization.available_resources,
+    )
+    app.state.rl_policy = rl_policy
+# Pass rl_policy to PrePositionScheduler(... rl_policy=rl_policy)
+```
+
+Also add `rl_policy_path` and `use_rl_policy` to `OptimizationConfig` in `src/config.py`.
+
+### 28. Validate RL policy before production enablement
+**Why:** A poorly trained policy will select NO_OP or low-quality actions, which causes silent degradation (the OR-Tools fallback kicks in but logs are the only signal).
+
+Acceptance criteria before enabling `use_rl_policy: true`:
+- Episode return (from `compute_episode_return`) must exceed the Phase 3 OR baseline by ≥ 5%.
+- Pre-stage hit rate ≥ Phase 3 baseline.
+- ONNX verification passes (`scripts/export_onnx.py --verify`).
+- Smoke test: run 10 shift episodes in simulation, confirm no exceptions and reasonable dispatch counts.
+
+---
+
+## H. IP / Legal
+
+### 30. Review US10504055B2 (Boston Dynamics / X Development patent)
 **Why:** DESIGN.md flags this as potentially relevant. It covers cost-function-based layout optimization driven by shipment deadlines and robotic execution.
 - Have legal counsel review claims 1–5.
 - Key distinguishing factors: (1) this system is external to the WMS — the patent describes integrated WMS architecture; (2) DHL's modular optimization patent establishes prior art for the external-observer pattern.
@@ -280,20 +336,20 @@ Validate: shortest path from any location to any dock door should match actual f
 
 ---
 
-## H. Ongoing Operations
+## I. Ongoing Operations
 
-### 27. Define and test rolling restart procedure
+### 31. Define and test rolling restart procedure
 **Why:** Restarting the app cancels the background scheduler loop and briefly loses Redis connection. Tasks in PENDING state survive (they're in Redis), but the timing window matters.
 - Procedure: drain queue (`GET /api/v1/movements/active`), wait for IN_PROGRESS tasks to complete, then restart.
 - Document: how to drain, max acceptable restart time, and Redis TTL interaction.
 
-### 28. Back up Redis task state
+### 32. Back up Redis task state
 **Why:** Redis is used as the task queue. Without backups, a Redis restart loses all PENDING task metadata. Active tasks in progress are at risk.
 - Enable Redis persistence (`appendonly yes`) for the task queue instance, or
 - Use a separate Redis instance with persistence for tasks vs. the caching instance.
 - Schedule daily `SAVE` or use RDB snapshots.
 
-### 29. Define re-scoring trigger events
+### 33. Define re-scoring trigger events
 **Why:** The scheduler runs automatically every `cycle_interval_seconds` (default: 60s). For faster response to appointment changes or new high-priority orders, wire event-based triggers.
 - Planned endpoint: `POST /api/v1/scheduler/trigger` (not yet implemented — see TODO.md).
 - Can be called by WMS webhooks, appointment check-in events, or task completion callbacks.

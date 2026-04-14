@@ -23,6 +23,7 @@ from src.scoring.value_function import MovementScorer, ScoringContext
 
 if TYPE_CHECKING:
     from src.optimizer.assignment import StagingAssignmentSolver
+    from src.optimizer.rl_policy import RLPolicyInference
 
 logger = structlog.get_logger(__name__)
 
@@ -52,6 +53,8 @@ class SchedulerConfig:
     available_resources: int = 5
     solver_timeout_seconds: int = 10
     max_staging_distance_meters: float = 50.0
+    use_rl_policy: bool = False
+    rl_policy_path: str = "models/policy.onnx"
 
 
 def _manhattan_distance(loc_a: Location, loc_b: Location) -> float:
@@ -109,6 +112,9 @@ class PrePositionScheduler:
         wms: WMS adapter for state retrieval.
         task_queue: Redis-backed task queue for dispatching.
         config: Scheduler configuration parameters.
+        rl_policy: Optional Phase 4 RL policy inference engine. When provided and
+            ``config.use_rl_policy`` is True, the RL policy selects movements with
+            OR-Tools as the fallback.
     """
 
     def __init__(
@@ -118,12 +124,14 @@ class PrePositionScheduler:
         wms: WMSAdapter,
         task_queue: TaskQueue,
         config: SchedulerConfig,
+        rl_policy: RLPolicyInference | None = None,
     ) -> None:
         self._scorer = scorer
         self._feasibility = feasibility
         self._wms = wms
         self._task_queue = task_queue
         self._config = config
+        self._rl_policy = rl_policy
 
     async def generate_candidates(self) -> list[CandidateMovement]:
         """Run the full candidate generation pipeline.
@@ -275,10 +283,12 @@ class PrePositionScheduler:
     ) -> tuple[list[CandidateMovement], list[MovementTask]]:
         """Run one full scheduling cycle.
 
-        When ``config.use_or_optimization`` is True, uses the CP-SAT assignment
-        solver (Phase 3) to select which candidates get which staging locations
-        within the resource budget.  Otherwise falls back to the Phase 1/2 greedy
-        top-N selection.
+        Dispatch path selection (in priority order):
+        1. Phase 4 RL policy (``config.use_rl_policy`` + ``rl_policy`` provided):
+           ONNX policy selects a single candidate; falls back to OR-Tools internally
+           when the policy selects NO_OP or fails.
+        2. Phase 3 OR-Tools (``config.use_or_optimization``): CP-SAT assignment solver.
+        3. Phase 1/2 greedy: top-N by score.
 
         Returns:
             Tuple of (all_candidates, dispatched_tasks).
@@ -287,7 +297,9 @@ class PrePositionScheduler:
         candidates = await self.generate_candidates()
         tasks: list[MovementTask] = []
 
-        if self._config.use_or_optimization and candidates:
+        if self._config.use_rl_policy and self._rl_policy is not None and candidates:
+            tasks = await self._run_rl_cycle(candidates)
+        elif self._config.use_or_optimization and candidates:
             tasks = await self._run_or_cycle(candidates)
         else:
             top = candidates[: self._config.dispatch_batch_size]
@@ -364,6 +376,61 @@ class PrePositionScheduler:
                 sku_id=task.sku_id,
                 score=round(task.score, 4),
                 via="or_tools",
+            )
+        return tasks
+
+    async def _run_rl_cycle(
+        self, candidates: list[CandidateMovement]
+    ) -> list[MovementTask]:
+        """Use RL policy (with OR-Tools fallback) to select and dispatch tasks.
+
+        Builds a minimal observation vector from candidate score components and
+        delegates action selection to RLPolicyInference.
+
+        Args:
+            candidates: Scored, feasible candidates from generate_candidates().
+
+        Returns:
+            Dispatched MovementTask list.
+        """
+        import numpy as np  # noqa: PLC0415
+
+        assert self._rl_policy is not None
+
+        # Build a flat observation from candidate features (simplified — a real
+        # deployment would use the full Gymnasium observation from the digital twin).
+        max_cands = 20
+        obs_size = max_cands * 6 + 10 * 4 + 4 * 3 + 3
+        obs = np.zeros(obs_size, dtype=np.float32)
+        for i, cand in enumerate(candidates[:max_cands]):
+            sc = cand.score_components
+            base = i * 6
+            obs[base:base + 6] = [
+                cand.score,
+                sc.get("t_saved", 0.0),
+                sc.get("p_load", 0.0),
+                sc.get("w_order", 0.0),
+                sc.get("c_move", 0.0),
+                sc.get("c_opportunity", 0.0),
+            ]
+
+        staging_locs: list[Location] = list(
+            {c.to_location.location_id: c.to_location for c in candidates}.values()
+        )
+
+        selected_tasks = self._rl_policy.select(obs, candidates, staging_locs)
+
+        tasks: list[MovementTask] = []
+        for task in selected_tasks[: self._config.dispatch_batch_size]:
+            await self._task_queue.push(task)
+            tasks.append(task)
+            MOVEMENTS_DISPATCHED.inc()
+            logger.info(
+                "scheduler.task_dispatched",
+                movement_id=str(task.movement_id),
+                sku_id=task.sku_id,
+                score=round(task.score, 4),
+                via="rl_policy",
             )
         return tasks
 

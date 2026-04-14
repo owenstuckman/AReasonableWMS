@@ -125,17 +125,29 @@ Tracks every feature by phase, status, and the file(s) that implement it.
 
 ---
 
-## Phase 3 — OR-Based Optimization (NOT STARTED)
+## Phase 3 — OR-Based Optimization (SHIPPED)
 
 | Feature | File | Status |
 |---------|------|--------|
-| `StagingAssignmentSolver` — CP-SAT assignment (maximize total value) | `src/optimizer/assignment.py` | ⬜ |
-| Assignment constraints: capacity, temp zone, hazmat adjacency, max staging distance | `src/optimizer/assignment.py` | ⬜ |
-| 10s solver timeout with best-found fallback | `src/optimizer/assignment.py` | ⬜ |
-| `MovementRoutePlanner` — VRPTW for forklift/AGV sequencing | `src/optimizer/routing.py` | ⬜ |
-| `WarehouseGraph` — aisle connectivity, one-way aisles, speed zones | `src/optimizer/routing.py` | ⬜ |
-| Feature flag integration (`use_or_optimization`) | `src/optimizer/scheduler.py` | ⬜ |
-| OR-based fallback policy for Phase 4 RL agent | `src/optimizer/scheduler.py` | ⬜ |
+| `StagingAssignmentSolver` — CP-SAT binary assignment maximising Σ(score × x[i][j]) | `src/optimizer/assignment.py` | ✅ |
+| Assignment constraint: each candidate ≤ 1 staging location | `src/optimizer/assignment.py` | ✅ |
+| Assignment constraint: each staging location ≤ 1 pallet | `src/optimizer/assignment.py` | ✅ |
+| Assignment constraint: total assignments ≤ `available_resources` budget | `src/optimizer/assignment.py` | ✅ |
+| Assignment constraint: temperature zone compatibility (CHILLED OK in FROZEN) | `src/optimizer/assignment.py` | ✅ |
+| Assignment constraint: hazmat adjacency — incompatible DOT class pairs blocked per aisle | `src/optimizer/assignment.py` | ✅ |
+| Assignment constraint: staging distance ≤ `max_staging_distance_meters` | `src/optimizer/assignment.py` | ✅ |
+| Configurable solver timeout (default 10s) with best-found-so-far fallback | `src/optimizer/assignment.py` | ✅ |
+| `AssignmentResult` — tasks, solver_status, objective_value, wall_seconds | `src/optimizer/assignment.py` | ✅ |
+| `WarehouseGraph` — directed/undirected edges with per-edge speed zones and one-way flag | `src/optimizer/routing.py` | ✅ |
+| `GraphEdge` — from/to node, distance, speed_mps, one_way | `src/optimizer/routing.py` | ✅ |
+| `MovementRoutePlanner` — OR-Tools VRPTW with time-window constraints | `src/optimizer/routing.py` | ✅ |
+| `Route` / `Stop` dataclasses — resource_id, ordered stops, arrival/departure times, total distance | `src/optimizer/routing.py` | ✅ |
+| Manhattan distance fallback when no explicit graph edge exists | `src/optimizer/routing.py` | ✅ |
+| `RoutingResult` — routes, solver_status, wall_seconds | `src/optimizer/routing.py` | ✅ |
+| `SchedulerConfig.use_or_optimization` flag gates Phase 3 code path | `src/optimizer/scheduler.py` | ✅ |
+| `PrePositionScheduler._run_or_cycle()` — calls CP-SAT solver, pushes assigned tasks | `src/optimizer/scheduler.py` | ✅ |
+| Lazy import of solver (module loads cleanly without OR-Tools at import time) | `src/optimizer/scheduler.py` | ✅ |
+| OR path increments `MOVEMENTS_DISPATCHED` Prometheus counter with `via=or_tools` tag | `src/optimizer/scheduler.py` | ✅ |
 
 ---
 

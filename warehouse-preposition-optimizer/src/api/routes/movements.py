@@ -122,32 +122,5 @@ async def get_active_tasks(
     return await task_queue.get_active_tasks()
 
 
-@router.get("/explain/{movement_id}")
-async def explain_score(
-    movement_id: UUID,
-    scheduler: Annotated[Any, Depends(_get_scheduler)],
-) -> dict[str, Any]:
-    """Return detailed score breakdown for a candidate movement.
-
-    Args:
-        movement_id: UUID of the candidate to explain.
-
-    Returns:
-        Dictionary with score, score_components, and reason.
-    """
-    candidates = await scheduler.generate_candidates()
-    candidate = next(
-        (c for c in candidates if c.movement_id == movement_id), None
-    )
-    if candidate is None:
-        raise HTTPException(status_code=404, detail=f"Candidate {movement_id} not found.")
-
-    return {
-        "movement_id": str(movement_id),
-        "sku_id": candidate.sku_id,
-        "score": candidate.score,
-        "score_components": candidate.score_components,
-        "reason": candidate.reason,
-        "from_location": candidate.from_location.location_id,
-        "to_location": candidate.to_location.location_id,
-    }
+# Score explanation is handled by /api/v1/scoring/explain/{id} in scoring.py
+# That route returns SHAP contributions when Phase 2 ML is active.

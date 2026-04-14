@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 
 from src.constraints.feasibility import FeasibilityEngine
+from src.monitoring.metrics import (
+    AVG_SCORE,
+    CONSTRAINT_VIOLATIONS,
+    MOVEMENTS_DISPATCHED,
+    MOVEMENTS_SCORED,
+)
 from src.dispatch.task_queue import TaskQueue
 from src.ingestion.wms_adapter import WMSAdapter, WarehouseState
 from src.models.inventory import InventoryPosition, Location
 from src.models.movements import CandidateMovement, MovementTask
 from src.scoring.value_function import MovementScorer, ScoringContext
+
+if TYPE_CHECKING:
+    from src.optimizer.assignment import StagingAssignmentSolver
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +37,10 @@ class SchedulerConfig:
         horizon_hours: Planning horizon for order lookups.
         max_candidates: Maximum candidates to evaluate per cycle.
         min_score_threshold: Minimum score to include a candidate.
+        use_or_optimization: Enable Phase 3 OR-Tools assignment solver.
+        available_resources: Resource budget passed to the assignment solver.
+        solver_timeout_seconds: CP-SAT solver wall-clock time limit.
+        max_staging_distance_meters: Maximum staging-to-source distance for assignment.
     """
 
     cycle_interval_seconds: int = 60
@@ -35,6 +48,10 @@ class SchedulerConfig:
     horizon_hours: float = 24.0
     max_candidates: int = 50
     min_score_threshold: float = 0.1
+    use_or_optimization: bool = False
+    available_resources: int = 5
+    solver_timeout_seconds: int = 10
+    max_staging_distance_meters: float = 50.0
 
 
 def _manhattan_distance(loc_a: Location, loc_b: Location) -> float:
@@ -128,10 +145,18 @@ class PrePositionScheduler:
             logger.info("scheduler.no_appointments")
             return []
 
+        # Build inventory lookup for ML feature quality (Phase 2).
+        # Most-recent position per SKU (first wins if duplicates exist).
+        inventory_by_sku = {
+            pos.sku.sku_id: pos
+            for pos in reversed(state.inventory_positions)
+        }
+
         context = ScoringContext(
             orders=state.outbound_orders,
             appointments=state.appointments,
             resource_utilization=_compute_avg_utilization(state.resource_utilization),
+            inventory_by_sku=inventory_by_sku,
         )
 
         candidates: list[CandidateMovement] = []
@@ -168,6 +193,10 @@ class PrePositionScheduler:
                 # Check feasibility first (hard constraints)
                 feasibility_result = self._feasibility.evaluate(candidate, state)
                 if not feasibility_result.feasible:
+                    for v in feasibility_result.violations:
+                        CONSTRAINT_VIOLATIONS.labels(
+                            constraint_type=v.constraint_type
+                        ).inc()
                     logger.debug(
                         "scheduler.candidate_infeasible",
                         sku_id=candidate.sku_id,
@@ -177,6 +206,7 @@ class PrePositionScheduler:
 
                 # Score the candidate
                 score = self._scorer.score(candidate, context)
+                MOVEMENTS_SCORED.inc()
                 if score < self._config.min_score_threshold:
                     continue
 
@@ -191,6 +221,9 @@ class PrePositionScheduler:
 
         deduped = sorted(best_by_sku.values(), key=lambda c: c.score, reverse=True)
         top_n = deduped[: self._config.max_candidates]
+
+        if top_n:
+            AVG_SCORE.set(sum(c.score for c in top_n) / len(top_n))
 
         logger.info(
             "scheduler.candidates_generated",
@@ -227,6 +260,7 @@ class PrePositionScheduler:
             )
             await self._task_queue.push(task)
             tasks.append(task)
+            MOVEMENTS_DISPATCHED.inc()
             logger.info(
                 "scheduler.task_dispatched",
                 movement_id=str(task.movement_id),
@@ -241,7 +275,10 @@ class PrePositionScheduler:
     ) -> tuple[list[CandidateMovement], list[MovementTask]]:
         """Run one full scheduling cycle.
 
-        Generates candidates, dispatches the top batch, and returns both.
+        When ``config.use_or_optimization`` is True, uses the CP-SAT assignment
+        solver (Phase 3) to select which candidates get which staging locations
+        within the resource budget.  Otherwise falls back to the Phase 1/2 greedy
+        top-N selection.
 
         Returns:
             Tuple of (all_candidates, dispatched_tasks).
@@ -250,22 +287,26 @@ class PrePositionScheduler:
         candidates = await self.generate_candidates()
         tasks: list[MovementTask] = []
 
-        top = candidates[: self._config.dispatch_batch_size]
-        for candidate in top:
-            task = MovementTask(
-                movement_id=candidate.movement_id,
-                sku_id=candidate.sku_id,
-                from_location=candidate.from_location,
-                to_location=candidate.to_location,
-                score=candidate.score,
-                score_components=candidate.score_components,
-                reason=candidate.reason,
-                estimated_duration_seconds=candidate.estimated_duration_seconds,
-                assigned_resource="UNASSIGNED",
-                dispatched_at=datetime.now(UTC),
-            )
-            await self._task_queue.push(task)
-            tasks.append(task)
+        if self._config.use_or_optimization and candidates:
+            tasks = await self._run_or_cycle(candidates)
+        else:
+            top = candidates[: self._config.dispatch_batch_size]
+            for candidate in top:
+                task = MovementTask(
+                    movement_id=candidate.movement_id,
+                    sku_id=candidate.sku_id,
+                    from_location=candidate.from_location,
+                    to_location=candidate.to_location,
+                    score=candidate.score,
+                    score_components=candidate.score_components,
+                    reason=candidate.reason,
+                    estimated_duration_seconds=candidate.estimated_duration_seconds,
+                    assigned_resource="UNASSIGNED",
+                    dispatched_at=datetime.now(UTC),
+                )
+                await self._task_queue.push(task)
+                tasks.append(task)
+                MOVEMENTS_DISPATCHED.inc()
 
         logger.info(
             "scheduler.cycle_complete",
@@ -273,6 +314,58 @@ class PrePositionScheduler:
             dispatched=len(tasks),
         )
         return candidates, tasks
+
+    async def _run_or_cycle(
+        self, candidates: list[CandidateMovement]
+    ) -> list[MovementTask]:
+        """Use CP-SAT assignment solver to select and dispatch tasks.
+
+        Imports the solver lazily so the module still loads when OR-Tools is not
+        installed (the flag guards execution, not import time).
+
+        Args:
+            candidates: Scored, feasible candidates from generate_candidates().
+
+        Returns:
+            Dispatched MovementTask list.
+        """
+        from src.optimizer.assignment import StagingAssignmentSolver  # noqa: PLC0415
+
+        # Collect all unique staging locations referenced by the candidates.
+        staging_locs: list[Location] = list(
+            {c.to_location.location_id: c.to_location for c in candidates}.values()
+        )
+
+        solver = StagingAssignmentSolver(
+            solver_timeout_seconds=self._config.solver_timeout_seconds,
+            max_staging_distance_meters=self._config.max_staging_distance_meters,
+        )
+        result = solver.solve(
+            candidates=candidates,
+            staging_locations=staging_locs,
+            available_resources=self._config.available_resources,
+        )
+
+        logger.info(
+            "scheduler.or_assignment_complete",
+            status=result.solver_status,
+            selected=len(result.tasks),
+            objective=round(result.objective_value, 4),
+        )
+
+        tasks: list[MovementTask] = []
+        for task in result.tasks[: self._config.dispatch_batch_size]:
+            await self._task_queue.push(task)
+            tasks.append(task)
+            MOVEMENTS_DISPATCHED.inc()
+            logger.info(
+                "scheduler.task_dispatched",
+                movement_id=str(task.movement_id),
+                sku_id=task.sku_id,
+                score=round(task.score, 4),
+                via="or_tools",
+            )
+        return tasks
 
 
 def _compute_avg_utilization(resource_utilization: dict[str, float]) -> float:

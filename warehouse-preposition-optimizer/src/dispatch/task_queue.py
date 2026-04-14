@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from src.models.movements import MovementStatus, MovementTask
+from src.monitoring.metrics import MOVEMENTS_COMPLETED, QUEUE_DEPTH
 
 logger = structlog.get_logger(__name__)
 
@@ -110,6 +111,12 @@ class TaskQueue:
         # Remove from pending set if terminal status
         if status in (MovementStatus.COMPLETED, MovementStatus.CANCELLED):
             await self._redis.zrem(_PENDING_SET_KEY, movement_id)
+            if status == MovementStatus.COMPLETED:
+                MOVEMENTS_COMPLETED.inc()
+
+        # Update queue depth gauge
+        depth = await self._redis.zcard(_PENDING_SET_KEY)
+        QUEUE_DEPTH.set(depth)
 
         logger.debug("task_queue.status_updated", movement_id=movement_id, status=status.value)
 

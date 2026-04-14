@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -105,7 +107,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         opportunity_cost=settings.scoring.weights.opportunity_cost,
         decay_constant_seconds=settings.scoring.decay_constant_seconds,
     )
-    scorer = MovementScorer(weights=weights, config=resource_config)
+
+    # Phase 2: wire ML InferenceEngine when enabled and model artifact exists
+    ml_inference = None
+    if settings.use_ml_prediction:
+        model_path = Path(settings.prediction.model_path)
+        if model_path.exists():
+            try:
+                from src.prediction.features import FeatureBuilder
+                from src.prediction.inference import InferenceEngine
+                from src.prediction.trainer import MLDemandPredictor
+                from src.scoring.demand_predictor import DemandPredictor
+
+                ml_predictor = MLDemandPredictor()
+                ml_predictor.load(model_path)
+                ml_inference = InferenceEngine(
+                    ml_predictor=ml_predictor,
+                    fallback=DemandPredictor(),
+                    feature_builder=FeatureBuilder(),
+                    cache_ttl_seconds=float(settings.prediction.prediction_cache_ttl_seconds),
+                )
+                logger.info("app.ml_inference_loaded", model_path=str(model_path))
+            except Exception as exc:
+                logger.warning(
+                    "app.ml_inference_load_failed",
+                    error=str(exc),
+                    model_path=str(model_path),
+                )
+        else:
+            logger.warning(
+                "app.ml_inference_model_missing",
+                model_path=str(model_path),
+                hint="Run scripts/generate_training_data.py then train MLDemandPredictor",
+            )
+
+    scorer = MovementScorer(weights=weights, config=resource_config, ml_inference=ml_inference)
 
     # Constraints
     feasibility = FeasibilityEngine(
@@ -146,18 +182,55 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.task_queue = task_queue
     app.state.scheduler = scheduler
     app.state.agv = AGVInterface()
+    app.state.ml_inference = ml_inference
+
+    # Background scheduler loop — runs run_cycle() every cycle_interval_seconds.
+    loop_task = asyncio.create_task(
+        _scheduler_loop(scheduler, scheduler_config.cycle_interval_seconds)
+    )
 
     logger.info("app.ready")
     yield
 
     # Shutdown
     logger.info("app.shutdown")
+    loop_task.cancel()
+    try:
+        await loop_task
+    except asyncio.CancelledError:
+        pass
     try:
         await wms_adapter.disconnect()
     except Exception as exc:
         logger.warning("app.wms_disconnect_error", error=str(exc))
     if redis_client:
         await redis_client.aclose()
+
+
+async def _scheduler_loop(scheduler: PrePositionScheduler, interval_seconds: int) -> None:
+    """Run the scheduler in a continuous background loop.
+
+    Calls run_cycle() every interval_seconds. Exceptions are logged and the loop
+    continues so a single WMS poll failure doesn't stop all future cycles.
+
+    Args:
+        scheduler: The pre-positioning scheduler to drive.
+        interval_seconds: Seconds to sleep between cycles.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            candidates, tasks = await scheduler.run_cycle()
+            logger.info(
+                "scheduler_loop.cycle_done",
+                candidates=len(candidates),
+                dispatched=len(tasks),
+            )
+        except asyncio.CancelledError:
+            logger.info("scheduler_loop.cancelled")
+            raise
+        except Exception as exc:
+            logger.error("scheduler_loop.cycle_error", error=str(exc))
 
 
 def create_app() -> FastAPI:

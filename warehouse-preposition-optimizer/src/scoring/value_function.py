@@ -62,11 +62,13 @@ class MovementScorer:
         weights: ScoringWeights,
         config: ResourceConfig,
         ml_inference: InferenceEngine | None = None,
+        dock_door_coords: dict[int, tuple[float, float]] | None = None,
     ) -> None:
         self._weights = weights
         self._config = config
         self._phase1_predictor = DemandPredictor()
         self._ml_inference = ml_inference
+        self._dock_door_coords = dock_door_coords or {}
 
     def score(
         self, candidate: CandidateMovement, context: ScoringContext
@@ -128,7 +130,7 @@ class MovementScorer:
                 historical_data=context.historical_data,
             )
 
-        dock_door_x, dock_door_y = _dock_door_coords(best_appointment.dock_door)
+        dock_door_x, dock_door_y = _dock_door_coords(best_appointment.dock_door, self._dock_door_coords)
 
         t_saved = self._compute_time_saved(
             candidate.from_location,
@@ -288,16 +290,32 @@ class MovementScorer:
         return self._config.base_opportunity_seconds * (1.0 / (1.0 - capped_util))
 
 
-def _dock_door_coords(dock_door: int) -> tuple[float, float]:
-    """Return approximate (x, y) coordinates for a dock door.
+# Default dock door coordinates used when no explicit map is provided.
+# Override via MovementScorer(dock_door_coords={1: (0.0, 5.0), 2: (0.0, 10.0), ...}).
+_DEFAULT_DOCK_DOOR_COORDS: dict[int, tuple[float, float]] = {}
 
-    In a real deployment, dock door coordinates would come from the WMS.
-    This stub places dock doors at x=0 and y = door_number * 5 meters.
+
+def _dock_door_coords(
+    dock_door: int,
+    coord_map: dict[int, tuple[float, float]] | None = None,
+) -> tuple[float, float]:
+    """Return (x, y) coordinates for a dock door in meters.
+
+    Resolution order:
+    1. ``coord_map`` argument (passed from MovementScorer config).
+    2. Module-level ``_DEFAULT_DOCK_DOOR_COORDS`` (set at app startup from config.yml).
+    3. Placeholder: x=0, y=door_number * 5 — clearly approximate, logs a warning once.
 
     Args:
         dock_door: Dock door number.
+        coord_map: Optional explicit mapping of door number to (x, y).
 
     Returns:
         (x, y) coordinate tuple in meters.
     """
+    if coord_map and dock_door in coord_map:
+        return coord_map[dock_door]
+    if dock_door in _DEFAULT_DOCK_DOOR_COORDS:
+        return _DEFAULT_DOCK_DOOR_COORDS[dock_door]
+    # Placeholder — replace with real coordinates (see HUMAN_TODO.md item 3).
     return 0.0, float(dock_door) * 5.0

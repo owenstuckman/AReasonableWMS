@@ -22,6 +22,9 @@ dependencies = [
     "scikit-learn>=1.5",
     "pandas>=2.0",
     "numpy>=1.26",
+    "ortools>=9.15.6755",
+    "simpy>=4.1.1",
+    "gymnasium>=1.2.3",
 ]
 
 [project.optional-dependencies]

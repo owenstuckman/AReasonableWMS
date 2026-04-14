@@ -8,28 +8,44 @@ Items are numbered sequentially. Sections are ordered by when you need to act.
 
 ## A. Before First Run (Blocking)
 
-### 1. Copy and configure `.env`
-**Why:** The app won't start without valid connection strings and an API key.
-```bash
-cd warehouse-preposition-optimizer
-cp .env.example .env
-# Edit .env:
-#   DATABASE_URL — postgresql+asyncpg://user:pass@host:5432/dbname
-#   REDIS_URL    — redis://host:6379/0
-#   API_KEY      — random secret: openssl rand -hex 32
+### 2. Replace sample warehouse coordinates with your real floor plan
+**Why:** `T_saved` and `C_move` are computed from `Location.x` and `Location.y` in meters. Correct coordinates produce meaningful scores; wrong ones produce silent garbage.
+
+**What's already there:** `scripts/init_db.sql` seeds a realistic sample layout so you can run end-to-end immediately:
+- Coordinate system: origin (0, 0) = SW corner; x-axis runs east; y-axis runs north into the warehouse.
+- Facility footprint: 120 m wide × 80 m deep.
+- Dock wall at y = 0; 4 dock doors at (10, 0), (40, 0), (70, 0), (100, 0).
+- 10 staging slots at y = 3 (immediately behind each dock door, including 2 cold-zone staging slots at dock 3).
+- 24 Zone A locations (aisles 1–3, y = 10–26 m), 18 Zone B (aisles 4–6, y = 34–50 m), 12 Zone C (aisles 7–9, y = 58–72 m), 8 cold locations at y = 76 m.
+- `T_saved` range: Zone A ≈ 0.9 s → Zone C ≈ 34.1 s (at 1.5 m/s forklift speed), giving the scoring function a wide dynamic range.
+
+**To replace with your real layout:**
+1. Export x/y coordinates from your CAD tool, WMS floor-plan module, or SLAM map (in metres; convert from feet if needed: multiply by 0.3048).
+2. Replace the `INSERT INTO locations …` rows in `scripts/init_db.sql` with your actual location IDs, x/y, aisle, bay, level, temperature zone, and `nearest_dock_door` foreign key.
+3. Update `INSERT INTO dock_doors …` with your real door positions (see item 3 below).
+4. Re-run `docker compose up -d --build` to re-seed the database.
+- Option B (live WMS): If your WMS already exports x/y, skip the SQL edits and ensure `forklift_speed_mps` in `config.yml` uses metres-per-second (default 1.5 m/s ≈ walking pace with load).
+
+### 3. Wire real dock door coordinates
+**Why:** The scoring function's `T_saved` term measures Euclidean distance to the dock door. The `MovementScorer` already accepts a `dock_door_coords` dict; it just needs to be populated with real values.
+
+**What's already there:** `scripts/init_db.sql` includes a `dock_doors` reference table:
+```sql
+SELECT door_id, x, y FROM dock_doors ORDER BY door_id;
+-- Returns: (1, 10.0, 0.0)  (2, 40.0, 0.0)  (3, 70.0, 0.0)  (4, 100.0, 0.0)
+```
+These match the sample layout. The Python startup wiring looks like:
+```python
+# In src/api/main.py (or wherever MovementScorer is constructed):
+rows = await db.fetch("SELECT door_id, x, y FROM dock_doors")
+dock_coords = {r["door_id"]: (r["x"], r["y"]) for r in rows}
+scorer = MovementScorer(dock_door_coords=dock_coords)
 ```
 
-### 2. Map real warehouse coordinates into Location x/y
-**Why:** `T_saved` and `C_move` are computed from `Location.x` and `Location.y` in meters. The seed data uses arbitrary numbers. Wrong coordinates = wrong scores.
-- Option A: Update `scripts/init_db.sql` seed rows with real x/y from your CAD or WMS floor plan.
-- Option B: Ensure your WMS exports x/y in meters; update `forklift_speed_mps` in `config.yml` if your WMS uses feet.
-- **Also map dock door coordinates**: `src/scoring/value_function._dock_door_coords()` currently uses a placeholder (`door * 5m`). Replace with real values, or move dock door positions into the `locations` table and fetch them from the WMS adapter.
-
-### 3. Map real dock door x/y coordinates
-**Why:** The scoring function's `T_saved` term measures distance to the dock door. The placeholder `_dock_door_coords(door_id)` returns `(0.0, door * 5.0)`. This makes distance calculations approximate at best.
-- Add a `dock_doors` table to `scripts/init_db.sql` with real x/y per door, or
-- Add a `dock_door_coordinates: dict[int, tuple[float, float]]` config section to `config.yml`, or
-- Modify `GenericDBAdapter` to query dock door positions from the WMS `locations` table where `is_staging=false AND nearest_dock_door IS NOT NULL`.
+**To replace with your real door positions:**
+1. `UPDATE dock_doors SET x = <real_x>, y = <real_y> WHERE door_id = <n>;` for each door, or edit the `INSERT` rows in `init_db.sql` directly.
+2. If your facility has more or fewer than 4 dock doors, add/remove rows in `dock_doors` and update `nearest_dock_door` foreign-key values in the `locations` table accordingly.
+3. Verify: `SELECT l.location_id, l.x, l.y, d.x AS door_x, d.y AS door_y, SQRT(POW(l.x - d.x, 2) + POW(l.y - d.y, 2)) AS dist_m FROM locations l JOIN dock_doors d ON l.nearest_dock_door = d.door_id ORDER BY dist_m DESC LIMIT 10;` — the 10 furthest locations should be your back-of-warehouse cold/slow zones.
 
 ### 4. Confirm table/column names for `generic_db` adapter
 **Why:** `src/ingestion/adapters/generic_db.py` assumes specific table and column names. Your WMS schema will differ.

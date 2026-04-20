@@ -109,6 +109,7 @@ Optional. For large multi-AGV deployments where coordination is the binding cons
 
 | Task | Priority | Status |
 |------|----------|--------|
+| DXF floor plan import | — | ✅ Done — `scripts/import_floor_plan.py` + `src/ingestion/floor_plan_parser.py`; 41 tests |
 | Calibrate scoring weights with ops team (AHP) | High — affects score quality from day 1 | ⬜ Blocked on human input (`calibrate_weights.py` ready) |
 | Backtest on historical data | High — validates scoring before full deploy | ⬜ Blocked on data export (`backtest.py` ready) |
 | Wire Prometheus metrics (increment counters in scheduler/task_queue) | High — metrics defined but never incremented | ✅ Done (Phase 2 gap fix) |

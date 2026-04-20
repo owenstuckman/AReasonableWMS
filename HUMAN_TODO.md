@@ -19,12 +19,40 @@ Items are numbered sequentially. Sections are ordered by when you need to act.
 - 24 Zone A locations (aisles 1–3, y = 10–26 m), 18 Zone B (aisles 4–6, y = 34–50 m), 12 Zone C (aisles 7–9, y = 58–72 m), 8 cold locations at y = 76 m.
 - `T_saved` range: Zone A ≈ 0.9 s → Zone C ≈ 34.1 s (at 1.5 m/s forklift speed), giving the scoring function a wide dynamic range.
 
-**To replace with your real layout:**
-1. Export x/y coordinates from your CAD tool, WMS floor-plan module, or SLAM map (in metres; convert from feet if needed: multiply by 0.3048).
-2. Replace the `INSERT INTO locations …` rows in `scripts/init_db.sql` with your actual location IDs, x/y, aisle, bay, level, temperature zone, and `nearest_dock_door` foreign key.
-3. Update `INSERT INTO dock_doors …` with your real door positions (see item 3 below).
-4. Re-run `docker compose up -d --build` to re-seed the database.
-- Option B (live WMS): If your WMS already exports x/y, skip the SQL edits and ensure `forklift_speed_mps` in `config.yml` uses metres-per-second (default 1.5 m/s ≈ walking pace with load).
+**Option A — Import directly from DWG/DXF (recommended):**
+A new import script can read your AutoCAD floor plan and generate SQL automatically.
+```bash
+# 1. Convert DWG → DXF if needed (DWG is AutoCAD's proprietary binary format):
+#    - AutoCAD: SAVEAS → AutoCAD 2018 DXF
+#    - ODA File Converter (free): https://www.opendesign.com/guestfiles/oda_file_converter
+#    - LibreCAD (open-source): File → Export → DXF
+
+# 2. Discover which layers contain racks, staging areas, and dock doors:
+uv run python scripts/import_floor_plan.py warehouse.dxf --list-layers
+
+# 3. Run the import (adjust layer names to match your file):
+uv run python scripts/import_floor_plan.py warehouse.dxf \
+    --locations-layer RACK_POSITIONS \
+    --staging-layer   STAGING_LANES \
+    --dock-layer      DOCK_DOORS \
+    --frozen-layer    FREEZER_ZONE \
+    --chilled-layer   CHILLER_ZONE \
+    --out scripts/init_db.sql --truncate
+
+# 4. Re-seed the database:
+docker compose up -d --build
+```
+The script auto-detects units from the DXF header (`$INSUNITS`); use `--unit feet` or `--unit mm` to override.
+Location IDs are read from block attributes tagged `LOCID`; change with `--attrib-tag YOUR_TAG`.
+
+**Option B — Edit SQL manually:**
+1. Export x/y from your CAD tool or WMS floor-plan module (confirm metres; multiply feet by 0.3048).
+2. Replace the `INSERT INTO locations …` rows in `scripts/init_db.sql` with your actual data.
+3. Update `INSERT INTO dock_doors …` with real door positions (see item 3).
+4. Re-run `docker compose up -d --build`.
+
+**Option C — Live WMS export:**
+If your WMS already stores x/y coordinates, skip SQL edits and ensure `forklift_speed_mps` in `config.yml` matches your units (default 1.5 m/s ≈ walking pace with load).
 
 ### 3. Wire real dock door coordinates
 **Why:** The scoring function's `T_saved` term measures Euclidean distance to the dock door. The `MovementScorer` already accepts a `dock_door_coords` dict; it just needs to be populated with real values.
@@ -42,10 +70,26 @@ dock_coords = {r["door_id"]: (r["x"], r["y"]) for r in rows}
 scorer = MovementScorer(dock_door_coords=dock_coords)
 ```
 
-**To replace with your real door positions:**
+**If using the DXF import tool (item 2, Option A):** dock doors are extracted and wired automatically.
+Add `--dock-coords-py dock_coords.py` to also write a Python dict you can paste into `src/api/main.py`:
+```bash
+uv run python scripts/import_floor_plan.py warehouse.dxf \
+    --dock-layer DOCK_DOORS \
+    --dock-coords-py dock_coords.py
+# dock_coords.py will contain: dock_door_coords = {1: (10.0, 0.0), 2: (40.0, 0.0), ...}
+```
+
+**If updating manually:**
 1. `UPDATE dock_doors SET x = <real_x>, y = <real_y> WHERE door_id = <n>;` for each door, or edit the `INSERT` rows in `init_db.sql` directly.
 2. If your facility has more or fewer than 4 dock doors, add/remove rows in `dock_doors` and update `nearest_dock_door` foreign-key values in the `locations` table accordingly.
-3. Verify: `SELECT l.location_id, l.x, l.y, d.x AS door_x, d.y AS door_y, SQRT(POW(l.x - d.x, 2) + POW(l.y - d.y, 2)) AS dist_m FROM locations l JOIN dock_doors d ON l.nearest_dock_door = d.door_id ORDER BY dist_m DESC LIMIT 10;` — the 10 furthest locations should be your back-of-warehouse cold/slow zones.
+3. Verify with SQL — the 10 furthest locations should be your back-of-warehouse cold/slow zones:
+```sql
+SELECT l.location_id, l.x, l.y,
+       SQRT(POW(l.x - d.x, 2) + POW(l.y - d.y, 2)) AS dist_m
+FROM locations l
+JOIN dock_doors d ON l.nearest_dock_door = d.door_id
+ORDER BY dist_m DESC LIMIT 10;
+```
 
 ### 4. Confirm table/column names for `generic_db` adapter
 **Why:** `src/ingestion/adapters/generic_db.py` assumes specific table and column names. Your WMS schema will differ.

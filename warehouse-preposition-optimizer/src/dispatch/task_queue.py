@@ -164,6 +164,21 @@ class TaskQueue:
 
         return cancelled_count
 
+    async def get_task(self, movement_id: str) -> MovementTask | None:
+        """Retrieve a single task by movement ID.
+
+        Args:
+            movement_id: UUID string of the movement to look up.
+
+        Returns:
+            :class:`MovementTask` if found, ``None`` otherwise.
+        """
+        data_key = f"{_DATA_KEY_PREFIX}{movement_id}"
+        raw = await self._redis.get(data_key)
+        if not raw:
+            return None
+        return MovementTask.model_validate(json.loads(raw))
+
     async def get_queue_depth(self) -> int:
         """Return the number of tasks currently in the pending queue.
 

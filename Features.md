@@ -190,6 +190,54 @@ Tracks every feature by phase, status, and the file(s) that implement it.
 
 ---
 
+---
+
+## Phase 5 — Operational Hardening (SHIPPED)
+
+### Rejection Store
+| Feature | File | Status |
+|---------|------|--------|
+| `RejectionStore` — Redis-backed rejection persistence with configurable TTL | `src/dispatch/rejection_store.py` | ✅ |
+| Per-movement rejection key (`rejection:{id}`) with Redis TTL expiry | `src/dispatch/rejection_store.py` | ✅ |
+| Per-SKU suppression key (`rejection:sku:{sku_id}`) — scheduler checks before dispatch | `src/dispatch/rejection_store.py` | ✅ |
+| Rejection history list (`rejection:history`) — last 200 entries, newest first | `src/dispatch/rejection_store.py` | ✅ |
+| `clear()` — operator lifts a rejection before TTL expiry | `src/dispatch/rejection_store.py` | ✅ |
+| Graceful no-op when `redis_client=None` | `src/dispatch/rejection_store.py` | ✅ |
+| Scheduler filters suppressed SKUs from `generate_candidates()` output | `src/optimizer/scheduler.py` | ✅ |
+| Scheduler cycle stats: `cycle_count`, `last_cycle_at`, rolling avg duration | `src/optimizer/scheduler.py` | ✅ |
+| `TaskQueue.get_task(movement_id)` — retrieve single task by UUID | `src/dispatch/task_queue.py` | ✅ |
+
+### WebSocket Real-Time Feed
+| Feature | File | Status |
+|---------|------|--------|
+| `ConnectionManager` — in-process pub/sub, broadcasts to all active connections | `src/api/websocket.py` | ✅ |
+| Dead connection pruning on failed send | `src/api/websocket.py` | ✅ |
+| `GET /api/v1/ws/movements?api_key=...` — WebSocket endpoint | `src/api/websocket.py` | ✅ |
+| API key auth via query parameter (closed with code 1008 if invalid) | `src/api/websocket.py` | ✅ |
+| `"ping"` → `"pong"` keep-alive | `src/api/websocket.py` | ✅ |
+| `cycle_complete` event (from background loop + `/scheduler/trigger`) | `src/api/main.py`, `src/api/routes/scheduler.py` | ✅ |
+| `task_dispatched` event (from `approve_movement`) | `src/api/routes/movements.py` | ✅ |
+| `task_status_changed` event (from acknowledge + complete endpoints) | `src/api/routes/movements.py` | ✅ |
+| `movement_rejected` event (from `reject_movement`) | `src/api/routes/movements.py` | ✅ |
+
+### Scheduler Control API
+| Feature | File | Status |
+|---------|------|--------|
+| `POST /api/v1/scheduler/trigger?reason=...` — immediate cycle outside timed loop | `src/api/routes/scheduler.py` | ✅ |
+| `GET /api/v1/scheduler/status` — cycle count, last run, avg duration, is_running flag | `src/api/routes/scheduler.py` | ✅ |
+
+### Operator Task Lifecycle
+| Feature | File | Status |
+|---------|------|--------|
+| `POST /api/v1/movements/{id}/reject` — now persists to `RejectionStore` | `src/api/routes/movements.py` | ✅ |
+| `POST /api/v1/movements/{id}/acknowledge` — PENDING → IN_PROGRESS | `src/api/routes/movements.py` | ✅ |
+| `POST /api/v1/movements/{id}/complete` — IN_PROGRESS → COMPLETED | `src/api/routes/movements.py` | ✅ |
+| `GET /api/v1/movements/rejected` — rejection history with limit param | `src/api/routes/movements.py` | ✅ |
+| `DELETE /api/v1/movements/{id}/rejection` — lift an active rejection | `src/api/routes/movements.py` | ✅ |
+| 409 Conflict on status transition violations | `src/api/routes/movements.py` | ✅ |
+
+---
+
 ## Deferred (Out of Scope for Current Phases)
 
 | Feature | Notes |

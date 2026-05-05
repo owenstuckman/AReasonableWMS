@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -22,10 +24,13 @@ from src.models.movements import CandidateMovement, MovementTask
 from src.scoring.value_function import MovementScorer, ScoringContext
 
 if TYPE_CHECKING:
+    from src.dispatch.rejection_store import RejectionStore
     from src.optimizer.assignment import StagingAssignmentSolver
     from src.optimizer.rl_policy import RLPolicyInference
 
 logger = structlog.get_logger(__name__)
+
+_CYCLE_DURATION_WINDOW = 20  # rolling average window size
 
 
 @dataclass
@@ -115,6 +120,8 @@ class PrePositionScheduler:
         rl_policy: Optional Phase 4 RL policy inference engine. When provided and
             ``config.use_rl_policy`` is True, the RL policy selects movements with
             OR-Tools as the fallback.
+        rejection_store: Optional Phase 5 rejection store.  When provided, SKUs
+            with active rejections are filtered out before dispatch.
     """
 
     def __init__(
@@ -125,6 +132,7 @@ class PrePositionScheduler:
         task_queue: TaskQueue,
         config: SchedulerConfig,
         rl_policy: RLPolicyInference | None = None,
+        rejection_store: RejectionStore | None = None,
     ) -> None:
         self._scorer = scorer
         self._feasibility = feasibility
@@ -132,6 +140,13 @@ class PrePositionScheduler:
         self._task_queue = task_queue
         self._config = config
         self._rl_policy = rl_policy
+        self._rejection_store = rejection_store
+        # Cycle statistics
+        self._cycle_count: int = 0
+        self._last_cycle_at: datetime | None = None
+        self._last_candidates: int = 0
+        self._last_dispatched: int = 0
+        self._cycle_durations: deque[float] = deque(maxlen=_CYCLE_DURATION_WINDOW)
 
     async def generate_candidates(self) -> list[CandidateMovement]:
         """Run the full candidate generation pipeline.
@@ -228,6 +243,17 @@ class PrePositionScheduler:
                 best_by_sku[candidate.sku_id] = candidate
 
         deduped = sorted(best_by_sku.values(), key=lambda c: c.score, reverse=True)
+
+        # Phase 5: filter out SKUs currently suppressed by the rejection store
+        if self._rejection_store is not None:
+            filtered: list[CandidateMovement] = []
+            for c in deduped:
+                if await self._rejection_store.is_sku_suppressed(c.sku_id):
+                    logger.debug("scheduler.candidate_rejected_suppressed", sku_id=c.sku_id)
+                else:
+                    filtered.append(c)
+            deduped = filtered
+
         top_n = deduped[: self._config.max_candidates]
 
         if top_n:
@@ -294,6 +320,7 @@ class PrePositionScheduler:
             Tuple of (all_candidates, dispatched_tasks).
         """
         logger.info("scheduler.cycle_start")
+        _t0 = time.monotonic()
         candidates = await self.generate_candidates()
         tasks: list[MovementTask] = []
 
@@ -320,12 +347,37 @@ class PrePositionScheduler:
                 tasks.append(task)
                 MOVEMENTS_DISPATCHED.inc()
 
+        self._cycle_durations.append(time.monotonic() - _t0)
+        self._cycle_count += 1
+        self._last_cycle_at = datetime.now(UTC)
+        self._last_candidates = len(candidates)
+        self._last_dispatched = len(tasks)
+
         logger.info(
             "scheduler.cycle_complete",
             candidates=len(candidates),
             dispatched=len(tasks),
         )
         return candidates, tasks
+
+    def get_status(self) -> dict[str, Any]:
+        """Return current cycle statistics as a plain dict.
+
+        Returns:
+            Dict compatible with :class:`~src.api.routes.scheduler.SchedulerStatusResponse`.
+        """
+        avg_duration = (
+            sum(self._cycle_durations) / len(self._cycle_durations)
+            if self._cycle_durations else 0.0
+        )
+        return {
+            "cycle_count": self._cycle_count,
+            "last_cycle_at": self._last_cycle_at,
+            "last_candidates_scored": self._last_candidates,
+            "last_tasks_dispatched": self._last_dispatched,
+            "avg_cycle_duration_seconds": round(avg_duration, 3),
+            "is_running": False,  # overridden by the route handler
+        }
 
     async def _run_or_cycle(
         self, candidates: list[CandidateMovement]

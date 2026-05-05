@@ -16,13 +16,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import config as config_router
 from src.api.routes import health as health_router
 from src.api.routes import movements as movements_router
+from src.api.routes import scheduler as scheduler_router
 from src.api.routes import scoring as scoring_router
+from src.api import websocket as websocket_module
 from src.config import load_config
 from src.constraints.capacity import CapacityConstraint
 from src.constraints.feasibility import FeasibilityEngine
 from src.constraints.hazmat import HazmatConstraint
 from src.constraints.temperature import TemperatureConstraint
+from src.api.websocket import ConnectionManager
 from src.dispatch.agv_interface import AGVInterface
+from src.dispatch.rejection_store import RejectionStore
 from src.dispatch.task_queue import TaskQueue
 from src.ingestion.adapters.generic_db import GenericDBAdapter
 from src.optimizer.scheduler import PrePositionScheduler, SchedulerConfig
@@ -158,6 +162,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         task_expiry_minutes=settings.scheduling.task_expiry_minutes,
     )
 
+    # Phase 5: rejection store + WebSocket manager
+    rejection_store = RejectionStore(redis_client=redis_client)
+    ws_manager = ConnectionManager()
+
     # Scheduler
     scheduler_config = SchedulerConfig(
         cycle_interval_seconds=settings.scheduling.cycle_interval_seconds,
@@ -172,6 +180,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         wms=wms_adapter,
         task_queue=task_queue,
         config=scheduler_config,
+        rejection_store=rejection_store,
     )
 
     # Store on app state
@@ -183,11 +192,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.scheduler = scheduler
     app.state.agv = AGVInterface()
     app.state.ml_inference = ml_inference
+    app.state.rejection_store = rejection_store
+    app.state.ws_manager = ws_manager
 
     # Background scheduler loop — runs run_cycle() every cycle_interval_seconds.
     loop_task = asyncio.create_task(
-        _scheduler_loop(scheduler, scheduler_config.cycle_interval_seconds)
+        _scheduler_loop(scheduler, scheduler_config.cycle_interval_seconds, ws_manager)
     )
+    app.state.scheduler_loop_task = loop_task
 
     logger.info("app.ready")
     yield
@@ -207,7 +219,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await redis_client.aclose()
 
 
-async def _scheduler_loop(scheduler: PrePositionScheduler, interval_seconds: int) -> None:
+async def _scheduler_loop(
+    scheduler: PrePositionScheduler,
+    interval_seconds: int,
+    ws_manager: ConnectionManager | None = None,
+) -> None:
     """Run the scheduler in a continuous background loop.
 
     Calls run_cycle() every interval_seconds. Exceptions are logged and the loop
@@ -216,6 +232,7 @@ async def _scheduler_loop(scheduler: PrePositionScheduler, interval_seconds: int
     Args:
         scheduler: The pre-positioning scheduler to drive.
         interval_seconds: Seconds to sleep between cycles.
+        ws_manager: Optional WebSocket manager for broadcasting cycle events.
     """
     while True:
         try:
@@ -226,6 +243,12 @@ async def _scheduler_loop(scheduler: PrePositionScheduler, interval_seconds: int
                 candidates=len(candidates),
                 dispatched=len(tasks),
             )
+            if ws_manager is not None:
+                await ws_manager.broadcast("cycle_complete", {
+                    "candidates_scored": len(candidates),
+                    "tasks_dispatched": len(tasks),
+                    "reason": "scheduled",
+                })
         except asyncio.CancelledError:
             logger.info("scheduler_loop.cancelled")
             raise
@@ -267,8 +290,10 @@ def create_app() -> FastAPI:
         Returns:
             HTTP response.
         """
-        # Allow health check without auth
-        if request.url.path in ("/api/v1/health", "/api/v1/metrics", "/docs", "/openapi.json"):
+        # Allow health check and WebSocket upgrade without HTTP auth
+        # (WebSocket auth is handled inside the endpoint via query param)
+        if request.url.path in ("/api/v1/health", "/api/v1/metrics", "/docs", "/openapi.json") \
+                or request.url.path.startswith("/api/v1/ws/"):
             return await call_next(request)
 
         api_key = request.headers.get("X-API-Key", "")
@@ -312,6 +337,8 @@ def create_app() -> FastAPI:
     app.include_router(movements_router.router, prefix=prefix)
     app.include_router(scoring_router.router, prefix=prefix)
     app.include_router(config_router.router, prefix=prefix)
+    app.include_router(scheduler_router.router, prefix=prefix)
+    app.include_router(websocket_module.router, prefix=prefix)
 
     return app
 

@@ -105,6 +105,33 @@ Optional. For large multi-AGV deployments where coordination is the binding cons
 
 ---
 
+## Phase 5: Operational Hardening — COMPLETE
+
+Real-time operator interfaces that close the four major Known Gaps.
+35 Phase 5 tests pass. Total test suite: 178 passed.
+
+| Step | File(s) | Status |
+|------|---------|--------|
+| 15 — Rejection store | `src/dispatch/rejection_store.py` | ✅ |
+| 16 — Scheduler trigger + status | `src/api/routes/scheduler.py` | ✅ |
+| 17 — WebSocket real-time feed | `src/api/websocket.py` | ✅ |
+| 18 — Acknowledge + complete endpoints | `src/api/routes/movements.py` | ✅ |
+
+**What changed:**
+- `reject_movement` now persists to Redis with configurable TTL; suppresses SKU from next cycle
+- `POST /api/v1/movements/{id}/acknowledge` — PENDING → IN_PROGRESS; broadcasts WS event
+- `POST /api/v1/movements/{id}/complete` — IN_PROGRESS → COMPLETED; broadcasts WS event
+- `GET /api/v1/movements/rejected` — rejection history
+- `DELETE /api/v1/movements/{id}/rejection` — lift an active rejection
+- `POST /api/v1/scheduler/trigger?reason=...` — manual cycle + broadcasts cycle_complete WS event
+- `GET /api/v1/scheduler/status` — cycle count, avg duration, last results
+- `GET /api/v1/ws/movements?api_key=...` — WebSocket stream (cycle_complete, task_dispatched, task_status_changed, movement_rejected)
+- `TaskQueue.get_task(movement_id)` — retrieve single task by ID
+- Scheduler tracks cycle count, last run time, avg duration; filters suppressed SKUs before dispatch
+- Background scheduler loop now broadcasts cycle_complete events
+
+---
+
 ## Ongoing / Infrastructure
 
 | Task | Priority | Status |
@@ -113,16 +140,12 @@ Optional. For large multi-AGV deployments where coordination is the binding cons
 | Calibrate scoring weights with ops team (AHP) | High — affects score quality from day 1 | ⬜ Blocked on human input (`calibrate_weights.py` ready) |
 | Backtest on historical data | High — validates scoring before full deploy | ⬜ Blocked on data export (`backtest.py` ready) |
 | Wire Prometheus metrics (increment counters in scheduler/task_queue) | High — metrics defined but never incremented | ✅ Done (Phase 2 gap fix) |
-| Add WebSocket `/api/v1/ws/movements` real-time feed | Medium | ⬜ Not started — `src/api/websocket.py` stub needed |
-| Add event-based scheduler trigger `POST /api/v1/scheduler/trigger` | Medium — currently cycle is time-only | ⬜ Not started |
 | Add `src/dispatch/human_interface.py` (RF gun / tablet push) | Medium | ⬜ Not started |
 | Add `src/monitoring/dashboard.py` (Grafana dashboard JSON) | Medium | ⬜ Not started |
-| Persist rejection feedback (`reject_movement` endpoint currently only logs) | Medium — needed for learning loop | ⬜ Not started |
 | Add `scripts/simulate.py` scenario runner | Low | ⬜ Not started |
 | Kubernetes manifests (`deploy/k8s/`) | Low — post-containerisation | ⬜ Not started |
 | Terraform (`deploy/terraform/`) | Low — post-containerisation | ⬜ Not started |
 | Restrict CORS `allow_origins=["*"]` for production | High security | ⬜ Not started (set via env var) |
-| Increase test coverage on `src/dispatch/task_queue.py` (24%) | Medium | ⬜ Needs Redis test fixture (fakeredis) |
 | Increase test coverage on `src/ingestion/adapters/generic_db.py` (0%) | Medium | ⬜ Needs DB test fixture (pytest-asyncio + testcontainers) |
 | Increase test coverage on `src/monitoring/metrics.py` (0%) | Low | ⬜ Blocked on metric increment wiring |
 
@@ -135,7 +158,7 @@ These are implemented but not yet fully connected end-to-end.
 | Gap | Location | Impact | Fix |
 |-----|----------|--------|-----|
 | Prometheus counters defined but never incremented | `src/monitoring/metrics.py` + all callers | Metrics endpoint returns zero counts | Import and call in `scheduler.py`, `task_queue.py` |
-| `reject_movement` endpoint doesn't persist rejections | `src/api/routes/movements.py:95` | Rejected moves reappear in next cycle | Add rejection store (Redis set or Postgres table) |
+| `reject_movement` endpoint doesn't persist rejections | `src/api/routes/movements.py` | Rejected moves reappear in next cycle | ✅ Fixed — `RejectionStore` persists with TTL; scheduler filters suppressed SKUs |
 | `AGVInterface.get_resource_utilization()` returns 0.0 stub | `src/dispatch/agv_interface.py` | C_opportunity always uses WMS-reported util, not real AGV util | Implement real fleet manager API call |
 | `TaskQueue` operations not logged to Prometheus | `src/dispatch/task_queue.py` | `queue_depth` and `movements_completed_total` always 0 | ✅ Fixed (Phase 2 gap fix) |
 | `GenericDBAdapter` column mappings not validated at startup | `src/ingestion/adapters/generic_db.py` | Silent data gaps if WMS schema differs | Add schema validation on `connect()` |

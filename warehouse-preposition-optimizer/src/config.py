@@ -82,6 +82,7 @@ class WMSConfig(BaseSettings):
     poll_interval_seconds: int = Field(default=30, gt=0)
     cache_ttl_seconds: int = Field(default=60, gt=0)
     connection_string: str = ""
+    schema_path: str | None = None
 
 
 class Settings(BaseSettings):

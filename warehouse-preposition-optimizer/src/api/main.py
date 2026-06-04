@@ -29,6 +29,7 @@ from src.dispatch.agv_interface import AGVInterface
 from src.dispatch.rejection_store import RejectionStore
 from src.dispatch.task_queue import TaskQueue
 from src.ingestion.adapters.generic_db import GenericDBAdapter
+from src.ingestion.schema import load_wms_schema
 from src.optimizer.scheduler import PrePositionScheduler, SchedulerConfig
 from src.scoring.value_function import MovementScorer
 from src.scoring.weights import ScoringWeights
@@ -81,11 +82,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("app.redis_unavailable", error=str(exc))
         redis_client = None
 
-    # WMS adapter
+    # WMS adapter (with optional customer schema mapping)
+    wms_schema = load_wms_schema(settings.wms.schema_path)
+    if settings.wms.schema_path:
+        logger.info("app.wms_schema_loaded", path=settings.wms.schema_path)
     wms_adapter = GenericDBAdapter(
         database_url=settings.database_url,
         redis_client=redis_client,
         cache_ttl_seconds=settings.wms.cache_ttl_seconds,
+        schema=wms_schema,
     )
     try:
         await wms_adapter.connect()

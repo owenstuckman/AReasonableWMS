@@ -1,13 +1,13 @@
 scoring:
   weights:
-    load_probability: 0.1517
-    movement_cost: 0.1917
-    opportunity_cost: 0.165
-    order_priority: 0.1917
-    time_saved: 0.3
+    load_probability: 0.1658
+    movement_cost: 0.0646
+    opportunity_cost: 0.0646
+    order_priority: 0.2628
+    time_saved: 0.4423
   decay_constant_seconds: 3600
   max_candidates_per_cycle: 50
-  min_score_threshold: 0.1
+  min_score_threshold: 0.01
 
 scheduling:
   cycle_interval_seconds: 60

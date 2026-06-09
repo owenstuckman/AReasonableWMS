@@ -24,6 +24,7 @@ _DEFAULT_TABLES: dict[str, str] = {
     "carrier_appointments": "carrier_appointments",
     "outbound_orders": "outbound_orders",
     "order_lines": "order_lines",
+    "dock_doors": "dock_doors",
 }
 
 _DEFAULT_COLUMNS: dict[str, dict[str, str]] = {
@@ -78,6 +79,12 @@ _DEFAULT_COLUMNS: dict[str, dict[str, str]] = {
         "sku_id": "sku_id",
         "quantity": "quantity",
         "picked": "picked",
+    },
+    "dock_doors": {
+        "dock_door": "dock_door",
+        "x": "x",
+        "y": "y",
+        "description": "description",
     },
 }
 

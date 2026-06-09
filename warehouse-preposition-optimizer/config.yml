@@ -28,7 +28,7 @@ constraints:
   max_staging_distance_meters: 50
 
 prediction:
-  enabled: false
+  enabled: true
   model_path: models/demand_lgbm.pkl
   fallback_on_error: true
   prediction_cache_ttl_seconds: 300
